@@ -2,16 +2,18 @@
 name: restapi-doc-generate
 description: >
   Generate REST API documentation from source code. Automatically detects the project framework
-  (Java Spring Boot, Python Flask/FastAPI, Go Gin/Echo, TypeScript Express/NestJS, etc.),
+  (Java Spring Boot, Dropwizard, Jersey, Python Flask/FastAPI, Go Gin/Echo, TypeScript Express/NestJS, etc.),
   locates all API endpoint classes and route definitions, recursively resolves nested
   request/response structures, and produces both human-readable Markdown and machine-readable
   OpenAPI 3.0 YAML documentation.
 
   Use this skill whenever the user asks to generate API docs, document endpoints, create API
   reference, produce interface documentation, or says anything about "接口文档", "API文档",
-  "generate docs", "document API", "API reference" — even if they don't explicitly say
-  "restapi-doc-generate". Also trigger when a user shares a codebase and wants to understand
-  or document its API layer.
+  "generate docs", "document API", "API reference", "OpenAPI", "Swagger" — even if they don't
+  explicitly say "restapi-doc-generate". Also trigger when the user mentions a specific framework
+  like "Dropwizard", "Jersey", "JAX-RS", "NestJS", "FastAPI", or "Gin" in the context of wanting
+  API documentation. Trigger when a user shares a codebase and wants to understand or document its
+  API layer.
 ---
 
 # REST API Documentation Generator
@@ -77,19 +79,25 @@ For each endpoint, collect:
 - **Authentication requirement** — whether the endpoint requires auth (e.g., @AuthenticationPrincipal, security decorators). This is NOT a parameter — it's an endpoint-level property.
 - **Response type** — the return type or response wrapper class
 
-**Parameter classification rules** (critical — follow these exactly):
-- **Request params table**: ONLY include @PathVariable, @RequestParam, @RequestHeader, path params, query params. Do NOT include @RequestBody or security injections.
-- **Request body section**: ONLY @RequestBody / body objects go here. Do not duplicate in the params table.
-- **Authentication**: If the endpoint uses @AuthenticationPrincipal, security context, or similar auth injection, mark the endpoint with "需要认证" instead of listing it as a parameter.
+#### How to classify parameters
 
-Use Glob to find candidate files, then Grep for route patterns, then Read the matching files.
+Readers of API documentation expect to see *what they need to send* clearly separated by how it's sent.
+Mixing a JSON body object into the same table as URL path parameters creates confusion because they're
+used in completely different ways (one goes in the URL, the other is a JSON payload).
+
+- **Request params table**: URL-level parameters — `@PathVariable`, `@RequestParam`, `@RequestHeader`, `@PathParam`, `@QueryParam`, `@HeaderParam`, path params, query params. These are values the user puts in the URL or headers.
+- **Request body section**: The JSON payload — `@RequestBody`, unannotated entity parameters in JAX-RS, or any request body object. This gets its own section with a full example, so don't duplicate it in the params table.
+- **Authentication**: Framework-managed security context — `@AuthenticationPrincipal`, `SecurityContext`, `req.user`, etc. These aren't user-supplied parameters at all. Instead, mark the endpoint with `🔒 需要认证` to signal that the reader needs to be logged in.
+
+Also check base classes and parent interfaces — many projects define common endpoints in abstract controllers or mixins. Missing these means the documentation is incomplete.
 
 ### Step 3: Resolve Data Structures
 
 This is the most important step. For every request body and response type found in Step 2:
 
 Note: Data structures (DTOs, records, enums, etc.) may live anywhere in the project, outside the scan directories.
-Always search the **entire project** when resolving types, not just the scan directories.
+Always search the **entire project** when resolving types, not just the scan directories. A controller module
+in `api/` might reference DTOs from `domain/` or `model/`, and the reader needs the full picture.
 
 1. **Locate the struct/class/DTO definition** — search by type name across the project
 2. **Extract all fields** — name, type, required/optional, description (from comments or annotations)
@@ -100,6 +108,14 @@ Always search the **entire project** when resolving types, not just the scan dir
 7. **Mark recursion depth** — if depth exceeds 3 levels, stop recursing and note "see [TypeName] definition"
 
 When no comment or annotation is available for a field, analyze the field name and context to infer its purpose. For example, `userName` likely means "用户名", `createTime` means "创建时间".
+
+#### Unwrap response wrappers
+
+Many frameworks wrap responses in generic containers. Always unwrap to the actual data type:
+- `ResponseEntity<T>` or `Response.ok(T)` → unwrap T
+- `Result<T>`, `ApiResponse<T>`, `Response<T>` → unwrap T
+- `Page<T>` → document the pagination wrapper fields plus T as the item type
+- `void` or no return → note as "无返回内容"
 
 ### Step 4: Generate Markdown Documentation
 
@@ -217,22 +233,52 @@ Use the template below. Group endpoints by their Controller/Router class.
 
 ### Step 5: Generate OpenAPI 3.0 YAML
 
-Convert the same data into an OpenAPI 3.0 compliant YAML document.
+Convert the same data into an OpenAPI 3.0 compliant YAML document. The goal is to produce a file
+that passes validation in tools like Swagger Editor without errors.
 
 Structure:
 - `openapi: 3.0.3`
-- `info`: project name, version, description
+- `info`: project name, version, description, `license` field (use `MIT` if unsure)
 - `servers`: base URL(s)
+- `tags`: one per Controller, with name and description
 - `paths`: one entry per endpoint
 - `components/schemas`: all data structures (request bodies, response types)
 
 Each path operation should include:
 - `summary` and `description`
 - `tags` (use the Controller name as tag)
-- `parameters` (path, query, header params)
+- `security` (if the endpoint requires auth — use `bearerAuth: []` or the appropriate scheme)
+- `parameters` (path, query, header params — NOT request body)
 - `requestBody` (with `$ref` to schema)
-- `responses` (with `$ref` to schema)
+- `responses` — include both success (200/201/202) and at least one error response (400, 401, or a generic default)
 - Nested types should be referenced via `$ref: '#/components/schemas/TypeName'`
+
+Define `components/securitySchemes` if any endpoints require authentication.
+
+Example of a well-formed operation:
+
+```yaml
+/api/users/{id}:
+  get:
+    tags: [UserController]
+    summary: 获取用户详情
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    responses:
+      '200':
+        description: 成功
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserResponse'
+      '404':
+        description: 用户不存在
+```
 
 ### Step 6: Output Files
 
@@ -241,10 +287,30 @@ Write two files to the project root (or user-specified directory):
 1. `API.md` — Markdown documentation
 2. `openapi.yaml` — OpenAPI 3.0 YAML
 
+## Edge Cases
+
+### No endpoints found
+
+If no API endpoints are found in the scan scope, do NOT generate empty documents.
+Instead, tell the user: "No API endpoints were found in {path}. Possible reasons: ..."
+and suggest checking the directory or framework detection.
+
+### Multiple modules with controllers
+
+In multi-module projects (e.g., Maven multi-module), each module may have its own controllers.
+Collect all endpoints across modules and group them by Controller as usual. If the user specified
+scan directories, only include controllers from those directories.
+
+### Unresolvable types
+
+When a type comes from an external library (no source in the project), represent it as its
+simple type name with a note: `external type — see {LibraryName} documentation`. Do not guess
+its fields.
+
 ## Important Notes
 
-- **Be thorough** — find ALL endpoints, not just obvious ones. Check base classes, mixins, and utility routers.
-- **Resolve everything** — do not leave any type as "unknown" or "object" if its definition exists in the codebase.
+- **Be thorough** — endpoints may hide in base classes, abstract controllers, or traits. Missing these means the documentation is misleadingly incomplete, because readers will assume what they see is everything.
+- **Resolve everything** — an unresolved "object" type forces the reader to go read the source code themselves, which defeats the purpose of generating documentation. If the definition exists in the codebase, find it.
 - **Chinese descriptions** — when the project uses Chinese comments/annotations, preserve them. When generating descriptions without comments, use Chinese (e.g., "用户名" not "username").
-- **Be honest** — if a type cannot be resolved (e.g., it comes from an external library with no source available), state that clearly rather than guessing.
-- **Preserve ordering** — list endpoints in the same order they appear in the source code.
+- **Be honest** — if a type cannot be resolved (e.g., it comes from an external library), say so clearly. Incorrect documentation is worse than incomplete documentation.
+- **Preserve ordering** — list endpoints in the same order they appear in the source code, so readers can cross-reference with the codebase.
