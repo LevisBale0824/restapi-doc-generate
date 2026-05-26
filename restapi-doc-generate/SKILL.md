@@ -35,10 +35,10 @@ Probe the project root for framework indicators. Check these in order:
 5. **Fallback** — scan source files for route annotations/decorators/patterns
 
 Read the relevant framework reference file from `references/` for detection details and parsing patterns:
-- `references/java-springboot.md` — Java Spring Boot
-- `references/python.md` — Flask and FastAPI
-- `references/go.md` — Gin and Echo
-- `references/typescript.md` — Express and NestJS
+- `references/java-rest.md` — Java (Spring Boot / Dropwizard / Jersey / RESTEasy)
+- `references/python-rest.md` — Flask and FastAPI
+- `references/go-rest.md` — Gin and Echo
+- `references/typescript-rest.md` — Express and NestJS
 
 If the framework cannot be determined, ask the user for guidance.
 
